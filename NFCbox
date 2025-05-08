@@ -1,0 +1,163 @@
+//one side of swirl goes to 5V, the other goes to pin 11. 
+//Servo control goes to pin 9. 
+//Don't use pins 2 and 3, we're using those to communicate with the shield.
+
+
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_PN532.h>
+#include <Servo.h>
+Servo boxLatch;
+
+#define PN532_IRQ   (2)
+#define PN532_RESET (3) 
+Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+
+bool locked = true;
+int pin = 11;
+int buttonState = 0;
+int lastState = 0; 
+int fallEdge = 0; 
+bool StateChange(int pin, int *lastState, int *fallEdge)
+
+{
+ int buttonState = digitalRead(pin);
+
+ //detecting a falling edge
+ if (buttonState != *lastState) {
+  if (buttonState == LOW) {
+    *fallEdge = 1;
+  } else {
+    *fallEdge = 0;
+  }
+  *lastState = buttonState;
+  return true;
+} 
+ return false;
+}
+
+void setup() {
+  Serial.begin(115200);
+  boxLatch.attach(9);
+  pinMode(11, INPUT_PULLUP);
+  lastState = digitalRead(11);
+  fallEdge = lastState;
+  boxLatch.write(90);
+//LOCKED MIGHT BE 90, JUST A GUESS. TEST LATER
+  
+  nfc.begin();
+
+  uint32_t versiondata = nfc.getFirmwareVersion();
+  if (! versiondata) {
+    Serial.print("Didn't find PN53x board");
+    while (1); // halt
+  }
+  // Got ok data, print it out!
+  Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX);
+  Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC);
+  Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
+
+  Serial.println("Waiting for an ISO14443A Card ...");
+}
+
+void readNFC() {
+  uint8_t success;
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+  uint8_t uidLength;                        // 4 or 7 bytes depending on ISO14443A card type
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+
+  if (success) {
+    Serial.println("Found an ISO14443A card");
+    Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
+    Serial.print("  UID Value: ");
+    nfc.PrintHex(uid, uidLength);
+    Serial.println("");
+
+    if (uidLength == 4)
+    {
+      Serial.println("Seems to be a Mifare Classic card (4 byte UID)");
+
+      // Now we need to try to authenticate it for read/write access
+      // Try with the factory default KeyA: 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF
+      Serial.println("Trying to authenticate block 4 with default KEYA value");
+      uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+	  // Start with block 4 (the first block of sector 1) since sector 0
+	  // contains the manufacturer data and it's probably better just
+	  // to leave it alone unless you know what you're doing
+      success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
+
+      if (success)
+      {
+        Serial.println("Sector 1 (Blocks 4..7) has been authenticated");
+        uint8_t data[16];
+        success = nfc.mifareclassic_ReadDataBlock(4, data);
+
+        if (success)
+        {
+          // Data read! Here it is:
+          Serial.println("Reading Block 4:");
+          nfc.PrintHexChar(data, 16);
+          Serial.println("");
+          // Wait a bit before reading the card again
+          delay(1000);
+        }
+        else
+        {
+          Serial.println("Ooops ... unable to read the requested block.  Try another key?");
+        }
+      }
+      else
+      {
+        Serial.println("Ooops ... authentication failed: Try another key?");
+      }
+    }
+//CLEAR UP FURTHER CODE. I DON'T THINK I'LL NEED THIS, READ KEY CARD TO CHECK UID LENGTH
+//////////////////////////////////////////////////
+    if (uidLength == 7)
+    {
+      // We probably have a Mifare Ultralight card ...
+      Serial.println("Seems to be a Mifare Ultralight tag (7 byte UID)");
+
+      // Try to read the first general-purpose user page (#4)
+      Serial.println("Reading page 4");
+      uint8_t data[32];
+      success = nfc.mifareultralight_ReadPage (4, data);
+      if (success)
+      {
+        // Data seems to have been read ... spit it out
+        nfc.PrintHexChar(data, 4);
+        Serial.println("");
+
+        // Wait a bit before reading the card again
+        delay(1000);
+      }
+      else
+      {
+        Serial.println("Ooops ... unable to read the requested page!?");
+      }
+    }
+//////////////////////////////////////////////////
+  }
+}
+
+void loop() {
+  if (buttonState == HIGH && locked == true) {
+    readNFC();
+//If readNFC data == keyNFC data, then
+    boxLatch.write(0);
+    locked = false;
+    delay(20);
+  }
+
+//this big combo bool isn't playing nice. It says it needs more arguments to function?
+//It's happy enough up on line 21, not sure why it's mad now. But I've also never used this
+//combo syntax, so I'm unlikely to catch the error
+  if (StateChange(pin &lastState, &fallEdge)) {
+    if (fallEdge == 1 && locked == false) {
+      boxLatch.write(90);
+      locked = true;
+      delay(20);
+    }
+  }
+}
